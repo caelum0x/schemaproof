@@ -1,0 +1,49 @@
+{
+  "name": "schemaproof",
+  "version": "0.1.0",
+  "description": "Know what your Postgres migration will actually do to YOUR table, right now — real lock classification plus a live read of your database's real row counts, dead-tuple ratio and active blockers (Supabase, Neon, or plain Postgres), with an optional AI-written safe rewrite.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "schemaproof": "./bin/schemaproof.mjs"
+  },
+  "files": [
+    "dist",
+    "bin"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsx src/cli.ts",
+    "dev": "tsx src/cli.ts"
+  },
+  "dependencies": {
+    "libpg-query": "^17.7.4",
+    "pg": "^8.13.1"
+  },
+  "optionalDependencies": {
+    "@anthropic-ai/sdk": "^0.32.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/caelum0x/schemaproof"
+  },
+  "keywords": [
+    "postgres",
+    "postgresql",
+    "migration",
+    "supabase",
+    "neon",
+    "schema",
+    "linter",
+    "zero-downtime"
+  ]
+}
