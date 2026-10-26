@@ -120,6 +120,35 @@ Or once published: `npx schemaproof check migration.sql --db "$DATABASE_URL"`.
 - **Plain Postgres** (RDS, local, anything else): works the same way,
   provider note is skipped.
 
+## Rehearse: real observed lock-wait time, not an estimate
+
+```
+npx schemaproof rehearse migration.sql --db "$DATABASE_URL"
+```
+
+`check --db` re-scores static rules against your table's real row count and
+current lock state, but it still never actually *runs* the migration.
+`rehearse` does: it clones `--db` onto the same Postgres server (needs
+`CREATEDB` there — the same local trust a normal `createdb` would need),
+restores the real data via `pg_dump`/`pg_restore`, replays a concurrent read
+burst against every table the migration touches, then runs each statement
+for real and reports how long it actually took to acquire its lock plus how
+long a fresh query submitted at the same moment was blocked behind it. The
+clone is dropped afterwards (`--keep-clone` to inspect it instead).
+
+Real example, same seeded 200k-row table used above: a plain
+`SET NOT NULL` came back at 12ms (cheap, as the static rule-of-thumb would
+suggest), but `ADD COLUMN ... DEFAULT md5(random()::text)` — a volatile
+default that defeats the fast-default optimization and forces a full
+rewrite — measured 586ms, with a concurrent query genuinely blocked for
+583ms behind it. That's the actual number your production deploy would
+stall for, not a row-count heuristic.
+
+This is the local-clone tier. A Neon-branch tier (apply against a real
+copy-on-write branch instead of a same-server clone, so a slow `pg_dump` of
+a huge table is never on the critical path) is still on the roadmap — it
+needs a real `NEON_API_KEY` to build and verify against.
+
 ## CI integration (design, not wired into this repo's own build)
 
 Exit codes are CI-gate-ready: `0` = info/clean, `1` = caution, `2` = block.
@@ -135,10 +164,9 @@ the feature is unsupported for your project.
 
 ## Roadmap
 
-- `schemaproof rehearse` — apply the migration to a disposable Neon branch
-  or a local `pg_dump`/restore clone, replay a short burst of real read
-  traffic against it, and report observed lock-wait time instead of an
-  estimate.
+- Neon-branch tier for `rehearse` (apply to a real disposable copy-on-write
+  branch instead of a same-server clone) — needs a real `NEON_API_KEY` to
+  build and verify against.
 - Supabase/Neon preview-branch GitHub Action that comments the verdict on
   the PR.
 - Postgres-version-aware rule tuning (e.g. PG17's `ALTER TABLE ... ADD
