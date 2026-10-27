@@ -253,6 +253,118 @@ function findTruncate(node: any): Finding | null {
   };
 }
 
+const TRANSACTION_START_KINDS = new Set(["TRANS_STMT_BEGIN", "TRANS_STMT_START"]);
+const TRANSACTION_END_KINDS = new Set(["TRANS_STMT_COMMIT", "TRANS_STMT_ROLLBACK"]);
+
+type ConcurrentOp = { concurrent: boolean; table: string | null; label: string };
+
+/**
+ * CONCURRENTLY operations (CREATE/DROP INDEX CONCURRENTLY, REINDEX ...
+ * CONCURRENTLY) are a hard Postgres error -- not a lock-duration risk --
+ * when they run inside a transaction block. detectConcurrentOp() recognizes
+ * every statement kind that carries a `concurrently` flag so the file-level
+ * transaction scan below can catch all three, not just CREATE INDEX.
+ */
+function detectConcurrentOp(node: any): ConcurrentOp | null {
+  const indexStmt = node?.IndexStmt;
+  if (indexStmt) {
+    return {
+      concurrent: !!indexStmt.concurrent,
+      table: relname(indexStmt),
+      label: `CREATE INDEX${indexStmt.idxname ? ` ${indexStmt.idxname}` : ""} CONCURRENTLY`,
+    };
+  }
+
+  const dropStmt = node?.DropStmt;
+  if (dropStmt && dropStmt.removeType === "OBJECT_INDEX") {
+    return { concurrent: !!dropStmt.concurrent, table: null, label: "DROP INDEX CONCURRENTLY" };
+  }
+
+  const reindexStmt = node?.ReindexStmt;
+  if (reindexStmt) {
+    const concurrent = (reindexStmt.params ?? []).some(
+      (p: any) => p?.DefElem?.defname === "concurrently",
+    );
+    const table = reindexStmt.kind === "REINDEX_OBJECT_TABLE" ? relname(reindexStmt) : null;
+    return { concurrent, table, label: "REINDEX ... CONCURRENTLY" };
+  }
+
+  return null;
+}
+
+/**
+ * Whole-file rule: libpg_query parses `BEGIN`/`COMMIT` as their own
+ * TransactionStmt nodes, so applyRules() -- which only ever sees one
+ * statement at a time -- can never tell that a CREATE INDEX CONCURRENTLY is
+ * sitting inside an explicit BEGIN...COMMIT elsewhere in the same file.
+ * That combination isn't a lock-duration risk the live-stats layer can
+ * grade: Postgres refuses to run it at all ("CREATE INDEX CONCURRENTLY
+ * cannot run inside a transaction block"), aborting the whole transaction
+ * and rolling back every earlier statement in it. Verified for real against
+ * a local Postgres 14 instance. This pass needs the full, ordered statement
+ * list, so it runs once per file instead of once per statement.
+ */
+export function applyFileLevelRules(
+  statements: Array<{ index: number; node: any }>,
+): Map<number, Finding[]> {
+  const findingsByIndex = new Map<number, Finding[]>();
+  const nonTransactionCount = statements.filter((s) => !s.node?.TransactionStmt).length;
+
+  let inExplicitTransaction = false;
+  for (const stmt of statements) {
+    const txn = stmt.node?.TransactionStmt;
+    if (txn) {
+      if (TRANSACTION_START_KINDS.has(txn.kind)) inExplicitTransaction = true;
+      else if (TRANSACTION_END_KINDS.has(txn.kind)) inExplicitTransaction = false;
+      continue;
+    }
+
+    const concurrentOp = detectConcurrentOp(stmt.node);
+    if (!concurrentOp || !concurrentOp.concurrent) continue;
+
+    const existing = findingsByIndex.get(stmt.index) ?? [];
+
+    if (inExplicitTransaction) {
+      existing.push({
+        ruleId: "concurrently-inside-transaction-block",
+        severity: "block",
+        table: concurrentOp.table,
+        summary: `${concurrentOp.label} is wrapped in an explicit BEGIN/COMMIT in this file`,
+        detail:
+          `Postgres refuses to run CONCURRENTLY operations inside a transaction block -- ` +
+          `this is not a lock-duration risk the live-stats layer can grade, it is a guaranteed ` +
+          `"cannot run inside a transaction block" error that aborts and rolls back every other ` +
+          `statement already run in this same BEGIN...COMMIT, including any earlier ALTER TABLE ` +
+          `in this same file.`,
+        safeRewrite:
+          `-- remove the surrounding BEGIN/COMMIT for this statement, or move it to its own\n` +
+          `-- migration file that runs outside any transaction wrapper your migration tool adds.`,
+      });
+    } else if (nonTransactionCount > 1) {
+      existing.push({
+        ruleId: "concurrently-may-run-inside-framework-transaction",
+        severity: "caution",
+        table: concurrentOp.table,
+        summary: `${concurrentOp.label} shares this file with ${nonTransactionCount - 1} other statement(s)`,
+        detail:
+          `This file has no explicit BEGIN/COMMIT, but most migration runners (Rails/ActiveRecord, ` +
+          `Prisma Migrate, Flyway, node-pg-migrate, Sequelize) wrap an entire multi-statement ` +
+          `migration file in one implicit transaction by default. If that happens here, this ` +
+          `CONCURRENTLY statement will fail with "cannot run inside a transaction block" even ` +
+          `though no BEGIN/COMMIT appears in this file's own text.`,
+        safeRewrite:
+          `-- confirm your migration tool runs this file outside a transaction (e.g. Rails'\n` +
+          `-- disable_ddl_transaction!, Flyway's transactional=false, node-pg-migrate's\n` +
+          `-- noTransaction: true), or move this statement to its own standalone migration file.`,
+      });
+    }
+
+    if (existing.length > 0) findingsByIndex.set(stmt.index, existing);
+  }
+
+  return findingsByIndex;
+}
+
 export function applyRules(node: any, rawSql: string): Finding[] {
   const findings: Finding[] = [];
 

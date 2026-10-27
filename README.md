@@ -49,6 +49,8 @@ Lock-classification rules (work with or without `--db`):
 | `add-column-volatile-default` | `ADD COLUMN ... DEFAULT now()` (or any function call) — defeats Postgres's fast-default optimization, forces a rewrite |
 | `add-notnull-column-without-default` | Will outright fail against any non-empty table |
 | `delete-without-where` / `truncate-table` | Data-loss guardrails |
+| `concurrently-inside-transaction-block` | `CREATE`/`DROP INDEX CONCURRENTLY` or `REINDEX ... CONCURRENTLY` wrapped in an explicit `BEGIN`/`COMMIT` in the same file — a guaranteed Postgres error ("cannot run inside a transaction block"), not a lock risk, that also rolls back every earlier statement in that transaction |
+| `concurrently-may-run-inside-framework-transaction` | Same `CONCURRENTLY` statement with no explicit `BEGIN` but sharing a file with other statements — most migration runners (Rails, Prisma Migrate, Flyway, node-pg-migrate) wrap a whole file in one implicit transaction by default, which fails the same way |
 
 With `--db <connection-string>`, every lock-sensitive finding above is
 re-scored against this database's **real** facts right now: `pg_class`

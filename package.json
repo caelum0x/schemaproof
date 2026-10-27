@@ -1,6 +1,6 @@
 {
   "name": "schemaproof",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Know what your Postgres migration will actually do to YOUR table, right now — real lock classification plus a live read of your database's real row counts, dead-tuple ratio and active blockers (Supabase, Neon, or plain Postgres), with an optional AI-written safe rewrite.",
   "license": "MIT",
   "type": "module",

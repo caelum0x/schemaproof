@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { Client } from "pg";
 import { parseMigration } from "./parser.js";
-import { applyRules } from "./rules.js";
+import { applyRules, applyFileLevelRules } from "./rules.js";
 import { getLiveTableStats } from "./liveStats.js";
 import { detectProvider, providerNote } from "./providers.js";
 import { adjustSeverityWithLiveStats, rollUpSeverity } from "./verdict.js";
@@ -58,9 +58,8 @@ const USAGE =
   "              get an AI-written plain-English explanation + safe rewrite.\n" +
   "--pr-comment: print a GitHub-flavored markdown report (verdict table + a\n" +
   "              collapsible per-statement detail section) instead of the plain-\n" +
-  "              text or --json report, ready to post as a PR comment body. See\n" +
-  "              templates/github-action.yml for a ready-to-copy workflow that\n" +
-  "              posts this output on every PR via `peter-evans/create-or-update-comment`.\n\n" +
+  "              text or --json report, ready to post as a PR comment body in\n" +
+  "              whatever CI step your own repo already runs.\n\n" +
   "schemaproof rehearse <migration.sql> --db <connection-string> [--json]\n" +
   "              [--keep-clone] [--burst-connections <n>] [--burst-ms <ms>]\n\n" +
   "              Clones --db onto the same server (needs CREATEDB there),\n" +
@@ -124,6 +123,7 @@ function renderPrComment(report: Array<Record<string, any>>, worstOverall: Sever
 async function runCheck(file: string, db: string | undefined, json: boolean, prComment = false): Promise<void> {
   const sql = readFileSync(file, "utf8");
   const statements = await parseMigration(sql);
+  const fileLevelFindings = applyFileLevelRules(statements);
 
   let client: Client | null = null;
   if (db) {
@@ -141,7 +141,10 @@ async function runCheck(file: string, db: string | undefined, json: boolean, prC
   let worstOverall: Severity = "info";
 
   for (const stmt of statements) {
-    const findings: Finding[] = applyRules(stmt.node, stmt.rawSql);
+    const findings: Finding[] = [
+      ...applyRules(stmt.node, stmt.rawSql),
+      ...(fileLevelFindings.get(stmt.index) ?? []),
+    ];
     const statsByTable = new Map<string, LiveTableStats>();
 
     if (client) {
