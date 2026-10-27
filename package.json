@@ -9,8 +9,7 @@
   },
   "files": [
     "dist",
-    "bin",
-    "templates"
+    "bin"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
