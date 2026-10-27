@@ -149,26 +149,37 @@ copy-on-write branch instead of a same-server clone, so a slow `pg_dump` of
 a huge table is never on the critical path) is still on the roadmap — it
 needs a real `NEON_API_KEY` to build and verify against.
 
-## CI integration (design, not wired into this repo's own build)
+## CI integration
 
 Exit codes are CI-gate-ready: `0` = info/clean, `1` = caution, `2` = block.
-A GitHub Actions step for *your* project would look like:
+The simplest GitHub Actions step for *your* project:
 
 ```yaml
 - run: npx schemaproof check db/migrations/latest.sql --db "${{ secrets.STAGING_DATABASE_URL }}"
 ```
 
-This repo intentionally does not ship its own `.github/workflows/` — that's
+For a PR comment with the real verdict instead of just a pass/fail check,
+`check` takes a `--pr-comment` flag that prints a GitHub-flavored markdown
+report (a verdict table plus a collapsible per-statement detail section)
+instead of the plain-text or `--json` output:
+
+```
+npx schemaproof check migration.sql --db "$DATABASE_URL" --pr-comment
+```
+
+A full, ready-to-copy workflow that finds every changed `.sql` file in a PR,
+runs `check --pr-comment` against each one, and posts (or updates) a single
+PR comment with the combined report is shipped inside this package at
+`templates/github-action.yml` — copy it to `.github/workflows/schemaproof.yml`
+in *your* repo. (This repo intentionally does not run it on itself — that's
 a deliberate choice for how *this* project is built, not a statement that
-the feature is unsupported for your project.
+the feature is unsupported for your project.)
 
 ## Roadmap
 
 - Neon-branch tier for `rehearse` (apply to a real disposable copy-on-write
   branch instead of a same-server clone) — needs a real `NEON_API_KEY` to
   build and verify against.
-- Supabase/Neon preview-branch GitHub Action that comments the verdict on
-  the PR.
 - Postgres-version-aware rule tuning (e.g. PG17's `ALTER TABLE ... ADD
   COLUMN` fast-default edge cases).
 
