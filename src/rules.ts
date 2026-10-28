@@ -2,11 +2,37 @@ import type { Finding } from "./types.js";
 
 // Default expressions that PostgreSQL can prove are immutable/constant at
 // ADD COLUMN time, so the "fast default" optimization (PG11+) applies and no
-// table rewrite happens. Anything else (a FuncCall like now(), random(),
-// gen_random_uuid(), nextval(...), or an expression referencing another
-// column) is treated as "possibly volatile" and flagged, because Postgres
-// still rewrites the whole table for those even on modern versions.
+// table rewrite happens. Anything else (an arithmetic/concat expression, a
+// genuinely VOLATILE FuncCall like random(), gen_random_uuid(), nextval(...))
+// is treated as "possibly volatile" and flagged, because Postgres still
+// rewrites the whole table for those even on modern versions.
 const SAFE_CONST_DEFAULT_NODES = new Set(["A_Const", "TypeCast"]);
+
+// SQLValueFunction nodes (CURRENT_TIMESTAMP, CURRENT_DATE, CURRENT_TIME,
+// LOCALTIME, LOCALTIMESTAMP, CURRENT_USER, SESSION_USER, etc.) have no
+// side effects and are STABLE, not VOLATILE -- same fast-default path as a
+// literal constant, not a per-row table rewrite.
+//
+// now() is the single FuncCall name allow-listed below for the same reason:
+// it's STABLE (pg_proc.provolatile = 's'), not VOLATILE, despite being a
+// function call. The previous version of this rule treated every FuncCall
+// default (including now() and CURRENT_TIMESTAMP) as "possibly volatile" and
+// returned BLOCK/"forces a full table rewrite" -- a false positive on one of
+// the most common real-world migration patterns (`created_at timestamptz
+// DEFAULT now()`).
+//
+// Verified live against a real seeded Postgres 14 instance (200k-row table,
+// not guessed from docs): after `ADD COLUMN ... DEFAULT now()` /
+// `DEFAULT CURRENT_TIMESTAMP` / `DEFAULT CURRENT_DATE`, `pg_relation_filenode()`
+// was unchanged and `pg_attribute.atthasmissing` was true (fast-default path,
+// no rewrite) -- identical to a literal constant default. By contrast,
+// `DEFAULT random()` (genuinely VOLATILE) changed the relfilenode,
+// `atthasmissing` was false, and existing rows got distinct per-row values
+// -- a real rewrite. Do not add more names to SAFE_FUNC_CALL_NAMES without
+// confirming `SELECT provolatile FROM pg_proc WHERE proname = '<name>'`
+// is not `'v'` -- gen_random_uuid(), nextval(), clock_timestamp(), and
+// random() are all genuinely `'v'` and must keep returning BLOCK.
+const SAFE_FUNC_CALL_NAMES = new Set(["now"]);
 
 function relname(node: any): string | null {
   return node?.relation?.relname ?? null;
@@ -22,7 +48,16 @@ function isVolatileDefault(defaultConstraint: any): boolean {
   const rawExpr = defaultConstraint?.raw_expr;
   if (!rawExpr) return false;
   const kind = Object.keys(rawExpr)[0];
-  return !SAFE_CONST_DEFAULT_NODES.has(kind);
+  if (SAFE_CONST_DEFAULT_NODES.has(kind)) return false;
+  if (kind === "SQLValueFunction") return false;
+  if (kind === "FuncCall") {
+    const funcname = (rawExpr.FuncCall?.funcname ?? [])
+      .map((n: any) => n?.String?.sval)
+      .filter(Boolean)
+      .join(".");
+    if (SAFE_FUNC_CALL_NAMES.has(funcname)) return false;
+  }
+  return true;
 }
 
 function describeType(typeName: any): string {
@@ -51,7 +86,8 @@ const ALTER_TABLE_CMD_RULES: Array<(cmd: any, table: string | null) => Finding |
         detail:
           `PostgreSQL's "fast default" optimization (11+) only skips the table rewrite ` +
           `when the DEFAULT is a literal constant Postgres can prove is immutable. ` +
-          `A function call (now(), gen_random_uuid(), nextval(...), etc.) is evaluated ` +
+          `A VOLATILE function call (random(), gen_random_uuid(), nextval(...), ` +
+          `clock_timestamp(), etc.) is evaluated ` +
           `per-row, which forces a full table rewrite under an ACCESS EXCLUSIVE lock -- ` +
           `the exact same cost as the pre-PG11 "every ADD COLUMN rewrites the table" problem.`,
         safeRewrite:

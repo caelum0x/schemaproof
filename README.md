@@ -46,7 +46,7 @@ Lock-classification rules (work with or without `--db`):
 | `add-unique-builds-index-inline` | `ADD CONSTRAINT ... UNIQUE` — builds its backing index inline instead of `CONCURRENTLY` |
 | `alter-column-type` | `ALTER COLUMN ... TYPE` — full table rewrite under ACCESS EXCLUSIVE |
 | `drop-column` | Destructive + breaks any still-running old app instance mid-deploy |
-| `add-column-volatile-default` | `ADD COLUMN ... DEFAULT now()` (or any function call) — defeats Postgres's fast-default optimization, forces a rewrite |
+| `add-column-volatile-default` | `ADD COLUMN ... DEFAULT random()` / `gen_random_uuid()` / `nextval(...)` / `clock_timestamp()` (a genuinely `VOLATILE` default) — defeats Postgres's fast-default optimization, forces a rewrite. `now()` and `CURRENT_TIMESTAMP`/`CURRENT_DATE`/`CURRENT_TIME` are `STABLE`, not volatile, and do **not** trigger this rule — verified live that they take the same fast-default path (no rewrite) as a literal constant |
 | `add-notnull-column-without-default` | Will outright fail against any non-empty table |
 | `delete-without-where` / `truncate-table` | Data-loss guardrails |
 | `concurrently-inside-transaction-block` | `CREATE`/`DROP INDEX CONCURRENTLY` or `REINDEX ... CONCURRENTLY` wrapped in an explicit `BEGIN`/`COMMIT` in the same file — a guaranteed Postgres error ("cannot run inside a transaction block"), not a lock risk, that also rolls back every earlier statement in that transaction |
